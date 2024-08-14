@@ -70,7 +70,7 @@ def _topk_channel(scores, K=100):
 
 def _topk(scores, K=100):
   batch, cat, height, width = scores.size()
-    
+
   topk_scores, topk_inds = torch.topk(scores.view(batch, cat, -1), K)
 
   topk_inds = topk_inds % (height * width)

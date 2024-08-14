@@ -18,6 +18,7 @@ from utils.image import flip, color_aug
 from utils.image import get_affine_transform, affine_transform
 from utils.image import gaussian_radius, draw_umich_gaussian
 import copy
+import h5py
 
 class GenericDataset(data.Dataset):
   is_fusion_dataset = False
@@ -69,25 +70,49 @@ class GenericDataset(data.Dataset):
     self.rot_mask = None
     self.amodel_offset_mask = None
     self.wh_weight = 1
-    
+    self.input_len = opt.input_len
+    self.event_data = 'gen4' in os.path.basename(img_dir)
+    if self.event_data:
+      self.mean = None
+      self.std = None
+
     if ann_path is not None and img_dir is not None:
       print('==> initializing {} data from {}, \n images from {} ...'.format(
         split, ann_path, img_dir))
       self.coco = coco.COCO(ann_path)
       self.images = self.coco.getImgIds()
 
-      image_info = self.coco.loadImgs(ids=[self.images[0]])[0]
-      # duplicate frames that have occlusion scenarious based on occlusion length to sample them more often during training
-      if 'has_occl' in image_info:
-        filtered = []
-        for image_id in self.images:
-          image_info = self.coco.loadImgs(ids=[image_id])[0]
-          filtered.append(image_id)
-          if image_info['has_occl']:
-            for i in range (image_info['occl_len']):
-              filtered.append(image_id)
-        
-        self.images = filtered
+      if self.event_data:
+        self.videos = [video_info['id'] for video_info in self.coco.dataset['videos']]
+        assert len(self.images) % len(self.videos) == 0
+        self.frames_per_video = len(self.images) // len(self.videos)
+        assert self.frames_per_video % self.input_len == 0
+        self.seqs_per_video = self.frames_per_video // self.input_len
+        self.images = self.images[::self.input_len]
+        if len(opt.selected_files) > 0:
+          self.videos = []
+          self.selected_images = []
+          for img_id in self.images:
+            image_info = self.coco.loadImgs(ids=[img_id])[0]
+            for selected_file in opt.selected_files:
+              if selected_file in image_info['file_name']:
+                if image_info['video_id'] not in self.videos:
+                  self.videos.append(image_info['video_id'])
+                self.selected_images.append(img_id)
+          self.images = self.selected_images
+          self.images = self.images[::self.input_len]
+      else:
+        image_info = self.coco.loadImgs(ids=[self.images[0]])[0]
+        # duplicate frames that have occlusion scenarious based on occlusion length to sample them more often during training
+        if 'has_occl' in image_info:
+          filtered = []
+          for image_id in self.images:
+            image_info = self.coco.loadImgs(ids=[image_id])[0]
+            filtered.append(image_id)
+            if image_info['has_occl']:
+              for i in range (image_info['occl_len']):
+                filtered.append(image_id)
+          self.images = filtered
 
       if opt.tracking:
         if not ('videos' in self.coco.dataset):
@@ -200,7 +225,13 @@ class GenericDataset(data.Dataset):
     img_path = os.path.join(img_dir, file_name)
     ann_ids = coco.getAnnIds(imgIds=[img_id])
     anns = copy.deepcopy(coco.loadAnns(ids=ann_ids))
-    img = cv2.imread(img_path)
+    if self.event_data:
+      frame_id = img_info['frame_id']
+      with h5py.File(img_path, 'r') as h5file:
+        img = h5file['data'][frame_id]
+        img = np.transpose(img, (1, 2, 0))
+    else:
+      img = cv2.imread(img_path)
 
     return img, anns, img_info, img_path
 
@@ -378,7 +409,8 @@ class GenericDataset(data.Dataset):
     inp = (inp.astype(np.float32) / 255.)
     if self.split == 'train' and not self.opt.no_color_aug and std is not None:
       color_aug(self._data_rng, inp, self._eig_val, self._eig_vec)
-    inp = inp - mean
+    if mean is not None:
+      inp = inp - mean
     if std is not None:
       inp = inp / std
 
@@ -450,14 +482,14 @@ class GenericDataset(data.Dataset):
 
 
   def _ignore_region(self, region, ignore_val=1):
-    np.maximum(region, ignore_val, out=region)
+    np.maximum(region, ignore_val, out=region) # TODO
 
 
   def _mask_ignore_or_crowd(self, ret, cls_id, bbox, track_id, pre_cts, pre_track_ids):
     if 'visibility' in ret:
       self._ignore_region(ret['visibility'][:, int(bbox[1]): int(bbox[3]) + 1, 
                                           int(bbox[0]): int(bbox[2]) + 1])
-    
+
     # mask out crowd region, only rectangular mask is supported
     if cls_id == 0: # ignore all classes
       self._ignore_region(ret['hm'][:, int(bbox[1]): int(bbox[3]) + 1, 
@@ -561,7 +593,7 @@ class GenericDataset(data.Dataset):
 
         ret['tracking_mask'][k] = occl_length
         ret['tracking'][k] = pre_ct - ct_int
-        
+
         gt_det['tracking'].append(ret['tracking'][k])
       else:
         ret['tracking_mask'][k] = 1

@@ -142,6 +142,11 @@ def generic_decode(output, K=100, opt=None, do_sigmoid=False):
     xs = xs0.view(batch, reg.size(1), 1) + 0.5
     ys = ys0.view(batch, reg.size(1), 1) + 0.5
 
+  # TODO
+  ret['xs'] = torch.squeeze(xs, 2)
+  ret['ys'] = torch.squeeze(ys, 2)
+  ret['cts'] = torch.cat([xs, ys], dim=2)
+
   if 'wh' in output:
     wh = get_wh(output['wh'], cat, batch, inds, K, clses)
     bboxes = torch.cat([xs - wh[..., 0:1] / 2, 
@@ -149,7 +154,7 @@ def generic_decode(output, K=100, opt=None, do_sigmoid=False):
                       xs + wh[..., 0:1] / 2, 
                       ys + wh[..., 1:2] / 2], dim=2)
     ret['bboxes'] = bboxes
- 
+
   if 'ltrb' in output:
     ltrb = output['ltrb']
     ltrb = _tranpose_and_gather_feat(ltrb, inds) # B x K x 4

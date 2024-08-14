@@ -2,6 +2,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
 import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d
 from mpl_toolkits.mplot3d import Axes3D
@@ -9,7 +10,242 @@ import time
 from PIL import Image
 import numpy as np
 import cv2
+from numpy.lib import recfunctions as rfn
 from .ddd_utils import compute_box_3d, project_to_image, draw_box_3d
+
+class BatchDebugger(object):
+  def __init__(self, opt, dataset, batch_size):
+    self.batch_size = batch_size
+    self.debugger = [Debugger(opt, dataset) for i in range(batch_size)]
+
+  def print_video_path(self):
+    for b in range(self.batch_size):
+      print(b, self.debugger[b].video_path)
+
+  def __len__(self):
+    return self.batch_size
+
+  def __getitem__(self, index):
+    if index < self.batch_size:
+      return self.debugger[index]
+
+  def start_video(self, path, indices, ws, hs, video_names=[]):
+    if len(video_names) == self.batch_size:
+      for b, (idx, w, h, video_name) in enumerate(zip(indices, ws, hs, video_names)):
+        self.debugger[b].start_video(path, idx, w, h, video_name)
+    else:
+      for b, (idx, w, h) in enumerate(zip(indices, ws, hs)):
+        self.debugger[b].start_video(path, idx, w, h, None)
+
+  def stop_video(self):
+    for b in range(self.batch_size):
+      self.debugger[b].stop_video()
+
+  def start_dt_npy(self, path, npy_names):
+    if len(npy_names) == self.batch_size:
+      for b, npy_name in enumerate(npy_names):
+        self.debugger[b].start_dt_npy(path, npy_name)
+    else:
+      for b in range(self.batch_size):
+        self.debugger[b].start_dt_npy(path, None)
+
+  def add_reformat_result(self, reformat_results):
+    for b in range(self.batch_size):
+      self.debugger[b].add_reformat_result(reformat_results[b])
+
+  def add_img(self, imgs, img_id='default', revert_color=False):
+    for b in range(self.batch_size):
+      self.debugger[b].add_img(imgs[b], img_id, revert_color)
+
+  def add_mask(self, mask, bg, imgId = 'default', trans = 0.8):
+    assert False
+    self.imgs[imgId] = (mask.reshape(
+      mask.shape[0], mask.shape[1], 1) * 255 * trans + \
+      bg * (1 - trans)).astype(np.uint8)
+
+  def show_img(self, pause = False, imgId = 'default'):
+    assert False
+    cv2.imshow('{}'.format(imgId), self.imgs[imgId])
+    if pause:
+      cv2.waitKey()
+
+  def add_blend_img(self, back, fore, img_id='blend', trans=0.7):
+    for b in range(self.batch_size):
+      self.debugger[b].add_blend_img(back[b], fore[b], img_id, trans)
+
+  def gen_colormap(self, imgs, output_res=None):
+    color_maps = None
+    for b in range(self.batch_size):
+      color_map = self.debugger[b].gen_colormap(imgs[b], output_res)
+      if isinstance(color_maps, np.ndarray):
+        color_maps = np.concatenate((color_maps, np.expand_dims(color_map, axis=0)), axis=0)
+      else:
+        color_maps = np.expand_dims(color_map, axis=0)
+
+    return color_maps
+
+  def gen_colormap_hp(self, imgs, output_res=None):
+    color_maps = None
+    for b in range(self.batch_size):
+      color_map = self.debugger[b].gen_colormap_hp(imgs[b], output_res)
+      if isinstance(color_maps, np.ndarray):
+        color_maps = np.concatenate((color_maps, np.expand_dims(color_map, axis=0)), axis=0)
+      else:
+        color_maps = np.expand_dims(color_map, axis=0)
+
+    return color_maps
+
+  def gen_colormap_visibility(self, imgs, output_res=None):
+    color_maps = None
+    for b in range(self.batch_size):
+      color_map = self.debugger[b].gen_colormap_visibility(imgs[b], output_res)
+      if isinstance(color_maps, np.ndarray):
+        color_maps = np.concatenate((color_maps, np.expand_dims(color_map, axis=0)), axis=0)
+      else:
+        color_maps = np.expand_dims(color_map, axis=0)
+
+    return color_maps
+
+  def _get_rand_color(self):
+    assert False
+    c = ((np.random.random((3)) * 0.6 + 0.2) * 255).astype(np.int32).tolist()
+    return c
+
+  # def add_coco_bbox(self, bbox, cat, conf=1, show_txt=True, 
+  #   no_bbox=False, img_id='default', occlusion=None, c=None):
+
+  def add_title(self, ct, frame_ids, delta_ts, img_id='default'):
+    for b in range(self.batch_size):
+      self.debugger[b].add_title(ct, frame_ids[b], delta_ts[b], img_id)
+
+  # def add_tracking_id(self, ct, tracking_id, img_id='default'):
+
+  def add_point(self, point, img_id='default'):
+    assert False
+    cv2.circle(self.imgs[img_id],
+                  (point[0], point[1]), 3, (255, 255, 255), -1)
+
+  # def add_coco_hp(self, points, tracking_id=0, img_id='default'):
+
+  def clear(self):
+    for b in range(self.batch_size):
+      self.debugger[b].clear()
+
+  # def show_all_imgs(self, pause=False, Time=0):
+
+  def save_img(self, imgId='default', path='./cache/debug/'):
+    assert False
+    cv2.imwrite(path + '{}.png'.format(imgId), self.imgs[imgId])
+
+  # def add_to_video(self, path='./cache/debug/', vis_type='generic'):
+
+  def save_all_imgs(self, path='./cache/debug/', prefix='', genID=False):
+    assert False
+    if genID:
+      try:
+        idx = int(np.loadtxt(path + '/id.txt'))
+      except:
+        idx = 0
+      prefix=idx
+      np.savetxt(path + '/id.txt', np.ones(1) * (idx + 1), fmt='%d')
+    for i, v in self.imgs.items():
+      if i in self.opt.save_imgs or self.opt.save_imgs == []:
+        cv2.imwrite(
+          path + '/{}{}{}.png'.format(prefix, i, self.opt.save_img_suffix), v)
+
+  def remove_side(self, img_id, img):
+    assert False
+    if not (img_id in self.imgs):
+      return
+    ws = img.sum(axis=2).sum(axis=0)
+    l = 0
+    while ws[l] == 0 and l < len(ws):
+      l+= 1
+    r = ws.shape[0] - 1
+    while ws[r] == 0 and r > 0:
+      r -= 1
+    hs = img.sum(axis=2).sum(axis=1)
+    t = 0
+    while hs[t] == 0 and t < len(hs):
+      t += 1
+    b = hs.shape[0] - 1
+    while hs[b] == 0 and b > 0:
+      b -= 1
+    self.imgs[img_id] = self.imgs[img_id][t:b+1, l:r+1].copy()
+
+  def project_3d_to_bird(self, pt):
+    assert False
+    pt[0] += self.world_size / 2
+    pt[1] = self.world_size - pt[1]
+    pt = pt * self.out_size / self.world_size
+    return pt.astype(np.int32)
+
+  # def add_3d_detection(
+  #   self, image_or_path, flipped, dets, calib, show_txt=False, 
+  #   vis_thresh=0.3, img_id='det'):
+
+  def compose_vis_ddd(
+    self, img_path, flipped, dets, calib,
+    vis_thresh, pred, bev, img_id='out'):
+    assert False
+    self.imgs[img_id] = cv2.imread(img_path)
+    if flipped:
+      self.imgs[img_id] = self.imgs[img_id][:, ::-1].copy()
+    h, w = pred.shape[:2]
+    hs, ws = self.imgs[img_id].shape[0] / h, self.imgs[img_id].shape[1] / w
+    self.imgs[img_id] = cv2.resize(self.imgs[img_id], (w, h))
+    self.add_blend_img(self.imgs[img_id], pred, img_id)
+    for item in dets:
+      if item['score'] > vis_thresh:
+        dim = item['dim']
+        loc = item['loc']
+        rot_y = item['rot_y']
+        cl = (self.colors[int(item['class']) - 1, 0, 0]).tolist()
+        if loc[2] > 1:
+          box_3d = compute_box_3d(dim, loc, rot_y)
+          box_2d = project_to_image(box_3d, calib)
+          box_2d[:, 0] /= hs
+          box_2d[:, 1] /= ws
+          self.imgs[img_id] = draw_box_3d(self.imgs[img_id], box_2d, cl)
+
+    self.imgs[img_id] = np.concatenate(
+      [self.imgs[img_id], self.imgs[bev]], axis=1)
+
+  # def add_bird_view(self, dets, vis_thresh=0.3, img_id='bird', cnt=0):
+
+  def add_bird_views(self, dets_dt, dets_gt, vis_thresh=0.3, img_id='bird'):
+    assert False
+    bird_view = np.ones((self.out_size, self.out_size, 3), dtype=np.uint8) * 230
+    for ii, (dets, lc, cc) in enumerate(
+      [(dets_gt, (12, 49, 250), (0, 0, 255)), 
+       (dets_dt, (250, 152, 12), (255, 0, 0))]):
+      for item in dets:
+        if item['score'] > vis_thresh \
+          and 'dim' in item and 'loc' in item and 'rot_y' in item:
+          dim = item['dim']
+          loc = item['loc']
+          rot_y = item['rot_y']
+          rect = compute_box_3d(dim, loc, rot_y)[:4, [0, 2]]
+          for k in range(4):
+            rect[k] = self.project_3d_to_bird(rect[k])
+          if ii == 0:
+            cv2.fillPoly(
+              bird_view,[rect.reshape(-1, 1, 2).astype(np.int32)],
+              lc,lineType=cv2.LINE_AA)
+          else:
+            cv2.polylines(
+              bird_view,[rect.reshape(-1, 1, 2).astype(np.int32)],
+              True,lc,2,lineType=cv2.LINE_AA)
+          # for e in [[0, 1], [1, 2], [2, 3], [3, 0]]:
+          for e in [[0, 1]]:
+            t = 4 if e == [0, 1] else 1
+            cv2.line(bird_view, (rect[e[0]][0], rect[e[0]][1]),
+                    (rect[e[1]][0], rect[e[1]][1]), lc, t,
+                    lineType=cv2.LINE_AA)
+
+    self.imgs[img_id] = bird_view
+
+  # def add_arrow(self, st, ed, img_id, c=(255, 0, 255), w=2):
 
 
 class Debugger(object):
@@ -22,7 +258,12 @@ class Debugger(object):
     self.names = dataset.class_name
     self.out_size = 384 if opt.dataset == 'kitti' else 512
     self.cnt = 0
+    self.save_videos = opt.save_videos
     self.video_file = None
+    self.video_path = None
+    self.save_npys = opt.save_npys
+    self.dt_npy_path = None
+    self.reformat_results = []
     colors = [(color_list[i]).astype(np.uint8) for i in range(len(color_list))]
     while len(colors) < len(self.names):
       colors = colors + colors[:min(len(colors), len(self.names) - len(colors))]
@@ -30,7 +271,9 @@ class Debugger(object):
     if self.theme == 'white':
       self.colors = self.colors.reshape(-1)[::-1].reshape(len(colors), 1, 1, 3)
       self.colors = np.clip(self.colors, 0., 0.6 * 255).astype(np.uint8)
-  
+    # TODO
+    self.colors = np.array([[0,85,255], [0,170,255], [0,255,255], [0, 255, 170], 
+                   [0, 255, 0], [170, 255, 0], [255, 255, 0], [255, 170, 0]]).reshape(8, 1, 1, 3)
     self.num_joints = 17
     self.edges = [[0, 1], [0, 2], [1, 3], [2, 4], 
                   [3, 5], [4, 6], [5, 6], 
@@ -53,15 +296,37 @@ class Debugger(object):
     # for bird view
     self.world_size = 64
 
-  def start_video(self, path, idx, w, h):
-    if self.video_file is not None:
-      self.video_file.release()
+  def start_video(self, path, idx, w, h, video_name=None):
+    self.stop_video()
 
-    self.video_file = cv2.VideoWriter('{}/vid_{}.avi'.format(path, idx), cv2.VideoWriter_fourcc('M','J','P','G'), 10, (w, h))
+    if self.save_videos:
+      if video_name == None:
+        self.video_path = '{}/vid_{}.avi'.format(path, idx)
+      else:
+        self.video_path = '{}/{}.avi'.format(path, video_name)
+      self.video_file = cv2.VideoWriter(self.video_path, cv2.VideoWriter_fourcc('M','J','P','G'), 10, (w, h))
 
   def stop_video(self):
-    if self.video_file is not None:
+    if self.save_videos and self.video_file is not None:
       self.video_file.release()
+      self.video_file = None
+
+    if self.save_npys and self.dt_npy_path is not None:
+      reformat_results = rfn.stack_arrays(self.reformat_results, usemask=False)
+      np.save(self.dt_npy_path, reformat_results)
+      self.dt_npy_path = None
+
+  def start_dt_npy(self, path, npy_name=None):
+    if self.save_npys:
+      if npy_name != None:
+        self.dt_npy_path = os.path.join(path, npy_name)
+        self.reformat_results = []
+      else:
+        self.dt_npy_path = None
+
+  def add_reformat_result(self, reformat_result):
+    if self.save_npys:
+      self.reformat_results.append(reformat_result)
 
   def add_img(self, img, img_id='default', revert_color=False):
     if revert_color:
@@ -107,7 +372,7 @@ class Debugger(object):
     color_map = (img * colors).max(axis=2).astype(np.uint8)
     color_map = cv2.resize(color_map, (output_res[1], output_res[0]))
     return color_map
-    
+
   def gen_colormap_hp(self, img, output_res=None):
     img = img.copy()
     img[img == 1] = 0.5 
@@ -123,6 +388,19 @@ class Debugger(object):
     color_map = cv2.resize(color_map, (output_res[0], output_res[1]))
     return color_map
 
+  def gen_colormap_visibility(self, img, output_res=None):
+    img = img.copy()
+    c, h, w = img.shape[0], img.shape[1], img.shape[2]
+    if output_res is None:
+      output_res = (h * self.down_ratio, w * self.down_ratio)
+    img = img.transpose(1, 2, 0).reshape(h, w, c, 1).astype(np.float32)
+
+    color_map = (img * 255).astype(np.uint8)
+    color_map = np.stack((color_map[...,0, 0], color_map[...,0,0], color_map[...,0,0]), axis=2)
+
+    color_map = cv2.resize(color_map, (output_res[1], output_res[0]))
+    return color_map
+
   def _get_rand_color(self):
     c = ((np.random.random((3)) * 0.6 + 0.2) * 255).astype(np.int32).tolist()
     return c
@@ -133,8 +411,8 @@ class Debugger(object):
     cat = int(cat)
     if c is None:
       c = self.colors[cat][0][0].tolist()
-      if self.theme == 'white':
-        c = (255 - np.array(c)).tolist()
+      # if self.theme == 'white':
+      #   c = (255 - np.array(c)).tolist()
       if self.opt.tango_color:
         c = (255 - tango_color_dark[cat][0][0]).tolist()
     if conf >= 1:
@@ -147,7 +425,7 @@ class Debugger(object):
       # txt = '{}'.format(size)
     else:
       txt = '{}{:.1f}'.format(self.names[cat], conf)
-    thickness = 2
+    thickness = 1
     fontsize = 0.8 if self.opt.qualitative else 0.5
     if self.opt.show_track_color:
       track_id = int(conf)
@@ -170,6 +448,14 @@ class Debugger(object):
                       (bbox[0] + cat_size[0], bbox[1]), c, -1)
         cv2.putText(self.imgs[img_id], txt, (bbox[0], bbox[1] - thickness - 1), 
                     font, fontsize, (0, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+
+  def add_title(self, ct, frame_id, delta_t, img_id='default'):
+    delta_t = delta_t // 1000
+    txt = '{} / {} ms'.format(frame_id*delta_t, (frame_id+1)*delta_t)
+    fontsize = 1.0
+    cv2.putText(self.imgs[img_id], txt, (int(ct[0]), int(ct[1])), 
+                cv2.FONT_HERSHEY_SIMPLEX, fontsize, 
+                (0, 0, 255), thickness=1, lineType=cv2.LINE_AA)
 
   def add_tracking_id(self, ct, tracking_id, img_id='default'):
     txt = '{}'.format(tracking_id)
@@ -242,7 +528,8 @@ class Debugger(object):
     cv2.imwrite(path + '{}.png'.format(imgId), self.imgs[imgId])
   
   def add_to_video(self, path='./cache/debug/', vis_type='generic'):
-    self.video_file.write(self.imgs[vis_type])
+    if self.save_videos:
+      self.video_file.write(self.imgs[vis_type])
     
   def save_all_imgs(self, path='./cache/debug/', prefix='', genID=False):
     if genID:
@@ -412,10 +699,10 @@ class Debugger(object):
 
     self.imgs[img_id] = bird_view
 
-  def add_arrow(self, st, ed, img_id, c=(255, 0, 255), w=2):
+  def add_arrow(self, st, ed, img_id, c=(255, 0, 255), w=2, enlarge=3):
     cv2.arrowedLine(
       self.imgs[img_id], (int(st[0]), int(st[1])), 
-      (int(ed[0] + st[0]), int(ed[1] + st[1])), c, 2,
+      (int(ed[0] * enlarge + st[0]), int(ed[1] * enlarge + st[1])), c, 2,
       line_type=cv2.LINE_AA, tipLength=0.3)
 
 color_list = np.array(

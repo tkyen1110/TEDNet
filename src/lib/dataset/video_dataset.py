@@ -14,6 +14,7 @@ class VideoDataset(GenericDataset):
     def __init__(self, opt=None, split=None, ann_path=None, img_dir=None):
         self.occlusion_thresh = opt.occlusion_thresh
         self.visibility_thresh = opt.visibility_thresh
+        self.num_workers = opt.num_workers
         self.input_len = None
         self.min_frame_dist = None
         self.max_frame_dist = None
@@ -21,6 +22,13 @@ class VideoDataset(GenericDataset):
         self.min_frame_dist = None
         self.max_frame_dist = None
         self.const_v_over_occl = False
+        self.event_data = 'gen4' in os.path.basename(img_dir)
+        if self.event_data:
+            self.aug_params = {}
+            self.frame_nums = {}
+            self.pre_anns = {}
+            self.pre_invis_anns = {}
+
         super(VideoDataset, self).__init__(opt, split, ann_path, img_dir)
         if split != 'train':
             self.input_len = 1
@@ -138,8 +146,65 @@ class VideoDataset(GenericDataset):
 
             vis_anns.append(vis_frame_anns)
             invis_anns.append(invis_frame_anns)
-        
+
         return vis_anns, invis_anns
+
+    def process_occlusions_event_data(self, anns, img_infos, trans_out, h, w, flipped=False):
+        # filtered list of visible annotations
+        vis_anns = []
+        pre_vis_frame_anns = []
+        # filtred list of invsible annotations
+        invis_anns = []
+        pre_invis_frame_anns = []
+
+        for i in range(len(anns)):
+            frame_anns = anns[i]
+            vis_frame_anns = []
+            invis_frame_anns = []
+
+            for ann in frame_anns:
+                # ann
+                pre_ann = ann.copy()
+                del ann['pre_bbox']
+                del ann['pre_visibility_ratio']
+                del ann['pre_id']
+                frame_ind = ann['frame_ind']
+
+                if ann['occlusion'] < self.occlusion_thresh:
+                    invis_frame_anns.append(ann)
+                else:
+                    vis_frame_anns.append(ann)
+
+                # pre_ann
+                if i == 0:
+                    if frame_ind == 0:
+                        assert len(pre_ann['pre_bbox']) == 0
+                        del pre_ann['pre_bbox']
+                        del pre_ann['pre_visibility_ratio']
+                        del pre_ann['pre_id']
+                        if pre_ann['occlusion'] < self.occlusion_thresh:
+                            pre_invis_frame_anns.append(pre_ann)
+                        else:
+                            pre_vis_frame_anns.append(pre_ann)
+                    elif len(pre_ann['pre_bbox']) > 0:
+                        pre_ann['image_id'] = pre_ann['image_id'] - 1
+                        pre_ann['frame_ind'] = pre_ann['frame_ind'] - 1
+
+                        pre_ann['bbox'] = pre_ann['pre_bbox']
+                        pre_ann['occlusion'] = pre_ann['pre_visibility_ratio']
+                        pre_ann['visibility_ratio'] = pre_ann['pre_visibility_ratio']
+                        pre_ann['id'] = pre_ann['pre_id']
+                        del pre_ann['pre_bbox']
+                        del pre_ann['pre_visibility_ratio']
+                        del pre_ann['pre_id']
+                        if pre_ann['occlusion'] < self.occlusion_thresh:
+                            pre_invis_frame_anns.append(pre_ann)
+                        else:
+                            pre_vis_frame_anns.append(pre_ann)
+            vis_anns.append(vis_frame_anns)
+            invis_anns.append(invis_frame_anns)
+
+        return vis_anns, invis_anns, pre_vis_frame_anns, pre_invis_frame_anns
 
     def get_ann_by_id(self, anns, track_id):
         for ann in anns:
@@ -174,51 +239,103 @@ class VideoDataset(GenericDataset):
 
         return ann
 
-    def __getitem__(self, index):
-        opt = self.opt
-        if self.input_len == None:
-            self.input_len = opt.input_len
-        imgs, anns, img_infos, img_paths = self._load_data(index, self.input_len)
-
+    def get_aug_params(self, imgs, seed=None):
         height, width = imgs[0].shape[0], imgs[0].shape[1]
         c = np.array([imgs[0].shape[1] / 2., imgs[0].shape[0] / 2.], dtype=np.float32)
         s = max(imgs[0].shape[0], imgs[0].shape[1]) * 1.0 if not self.opt.not_max_crop \
         else np.array([imgs[0].shape[1], imgs[0].shape[0]], np.float32)
+
+        if seed != None:
+            np.random.seed(seed)
         aug_s, rot, flipped = 1, 0, 0
         if self.split == 'train':
             c, aug_s, rot = self._get_aug_param(c, s, width, height)
         s = s * aug_s
-        if np.random.random() < opt.flip:
+        if np.random.random() < self.opt.flip:
             flipped = 1
 
         trans_input = get_affine_transform(
         c, s, rot, [self.default_resolution[1], self.default_resolution[0]])
         trans_output = get_affine_transform(
         c, s, rot, [self.default_resolution[1] // self.opt.down_ratio, self.default_resolution[0] // self.opt.down_ratio])
- 
-        # if there are occlusion labels in the annotations, separate them into visible and invisible ones, or simply filter out invisible annotations
-        invis_anns = [[]] * len(anns)
-        if (len(anns[0]) > 0) and 'occlusion' in anns[0][0] and opt.sup_invis:
-            anns, invis_anns = self.process_occlusions(copy.deepcopy(anns), img_infos, trans_output, height, width, flipped)
-        elif (len(anns[0]) > 0) and 'occlusion' in anns[0][0] and not opt.sup_invis:
-            anns = self.hide_occlusions(copy.deepcopy(anns))
+
+        return height, width, c, s, aug_s, rot, flipped, trans_input, trans_output
+
+    def __getitem__(self, index_and_seed):
+        index, seed = index_and_seed
+        opt = self.opt
+        if self.input_len == None:
+            self.input_len = opt.input_len
+
+        if self.event_data:
+            imgs, anns, img_infos, img_paths = self._load_event_data(index, self.input_len)
+            video_id = img_infos[0]['video_id']
+            frame_id = img_infos[0]['frame_id']
+
+            # TODO
+            if self.num_workers == 0:
+                if video_id not in self.aug_params.keys():
+                    height, width, c, s, aug_s, rot, flipped, trans_input, trans_output = self.get_aug_params(imgs)
+                    self.aug_params[video_id] = [height, width, c, s, aug_s, rot, flipped, trans_input, trans_output]
+                    self.frame_nums[video_id] = len(img_infos)
+                else:
+                    height, width, c, s, aug_s, rot, flipped, trans_input, trans_output = self.aug_params[video_id]
+                    self.frame_nums[video_id] += len(img_infos)
+
+                anns, invis_anns, pre_anns, pre_invis_anns = self.process_occlusions_event_data(copy.deepcopy(anns), img_infos, trans_output, height, width, flipped)
+                assert (video_id in self.pre_anns.keys() and video_id in self.pre_invis_anns.keys()) or \
+                       (video_id not in self.pre_anns.keys() and video_id not in self.pre_invis_anns.keys())
+
+                if video_id in self.pre_anns.keys() and video_id in self.pre_invis_anns.keys():
+                    # if video_id==41:
+                    #     print("\npre_anns = self.pre_anns[{}] ; frame_id = {}".format(video_id, frame_id))
+                    #     if pre_anns!=self.pre_anns[video_id]:
+                    #         for preann in self.pre_anns[video_id]:
+                    #             if preann not in pre_anns:
+                    #                 print(preann)
+                    pre_anns = copy.deepcopy(self.pre_anns[video_id])
+                    pre_invis_anns = copy.deepcopy(self.pre_invis_anns[video_id])
+
+                if self.frame_nums[video_id] == self.frames_per_video:
+                    del self.aug_params[video_id]
+                    del self.frame_nums[video_id]
+                    del self.pre_anns[video_id]
+                    del self.pre_invis_anns[video_id]
+            else:
+                height, width, c, s, aug_s, rot, flipped, trans_input, trans_output = self.get_aug_params(imgs, seed)
+                anns, invis_anns, pre_anns, pre_invis_anns = self.process_occlusions_event_data(copy.deepcopy(anns), img_infos, trans_output, height, width, flipped)
+
+        else:
+            imgs, anns, img_infos, img_paths = self._load_data(index, self.input_len)
+            video_id = img_infos[0]['video_id']
+            frame_id = img_infos[0]['frame_id']
+            height, width, c, s, aug_s, rot, flipped, trans_input, trans_output = self.get_aug_params(imgs)
+
+            # if there are occlusion labels in the annotations, separate them into visible and invisible ones, or simply filter out invisible annotations
+            invis_anns = [[]] * len(anns)
+            if (len(anns[0]) > 0) and 'occlusion' in anns[0][0] and opt.sup_invis:
+                anns, invis_anns = self.process_occlusions(copy.deepcopy(anns), img_infos, trans_output, height, width, flipped)
+            elif (len(anns[0]) > 0) and 'occlusion' in anns[0][0] and not opt.sup_invis:
+                anns = self.hide_occlusions(copy.deepcopy(anns))
+
+            pre_anns = copy.deepcopy(anns[0])
+            pre_invis_anns = copy.deepcopy(anns[0]) # TODO TK: Why not invis_anns[0]?
 
         rets = []
-        pre_anns = copy.deepcopy(anns[0])
-        pre_invis_anns = copy.deepcopy(anns[0])
         apply_noise_to_centers = False
         skipped_objs = {}
-        # invisible objects that have left the frame according to cosntant velocity assumption
+        # invisible objects that have left the frame according to constant velocity assumption
         out_of_frame = set([])
         # iterate over frames
         for i in range(len(imgs)):
             # do not apply noise to previous centers in the first frame to avoid non-zero tracking targets
-            if i > 0:
+            if (not self.event_data and i > 0) or (self.event_data and frame_id + i > 0):
                 apply_noise_to_centers = True
             img = imgs[i]
             anns_frame = copy.deepcopy(anns[i])
             anns_invis_frame = copy.deepcopy(invis_anns[i])
             img_info = img_infos[i]
+
             if flipped:
                 img = img[:, ::-1, :]
                 anns_frame = self._flip_anns(anns_frame, width)
@@ -243,7 +360,7 @@ class VideoDataset(GenericDataset):
             inp = self._get_input(img, trans_input, self.mean, self.std)
             ret = {'image': inp}
             gt_det = {'bboxes': [], 'scores': [], 'clses': [], 'cts': []}
-            
+
             ### init samples
             self._init_ret(ret, gt_det)
             calib = self._get_calib(img_info, width, height)
@@ -270,7 +387,7 @@ class VideoDataset(GenericDataset):
                 if ann['track_id'] in out_of_frame:
                     out_of_frame.remove(ann['track_id'])
                 elif (cls_id <= 0) or (('iscrowd' in ann) and (ann['iscrowd'] == 1)) or (box_size < self.box_size_thresh[cls_id - 1]):
-                    v = self._mask_ignore_or_crowd(ret, cls_id, bbox, ann['track_id'], pre_cts, track_ids)
+                    v = self._mask_ignore_or_crowd(ret, cls_id, bbox, ann['track_id'], pre_cts, track_ids) #　TODO
                     continue
 
                 is_added = self._add_instance(
@@ -308,7 +425,7 @@ class VideoDataset(GenericDataset):
                     else:
                         # first frame of an occlusion, find annotation of that object in the previous frame (last seen)
                         ann = self.get_ann_by_id(pre_anns, ann['track_id'])
-                        ann['last_seen_size'] = ann['bbox'][2] * ann['bbox'][2] 
+                        ann['last_seen_size'] = ann['bbox'][2] * ann['bbox'][2] # TODO
                         if ann['track_id'] not in track_ids:
                             out_of_frame.add(ann['track_id'])
                             continue
@@ -414,6 +531,7 @@ class VideoDataset(GenericDataset):
 
             meta = {
             'calib': calib,
+            'seed': seed,
             'c':c,
             's':s,
             'height':height,
@@ -432,6 +550,10 @@ class VideoDataset(GenericDataset):
             pre_anns = copy.deepcopy(anns[i])
             pre_invis_anns = copy.deepcopy(invis_anns[i])
 
+            if self.event_data and self.num_workers == 0 and i==len(imgs)-1:
+                self.pre_anns[img_info['video_id']] = copy.deepcopy(anns[i])
+                self.pre_invis_anns[img_info['video_id']] = copy.deepcopy(invis_anns[i])
+
         return rets
 
     def update_pre(self, pre_anns, skipped_objs):
@@ -442,7 +564,6 @@ class VideoDataset(GenericDataset):
             updated.append(ann)
 
         return updated
-
 
     def _load_data(self, index, input_len):
         coco = self.coco
@@ -457,7 +578,7 @@ class VideoDataset(GenericDataset):
 
         frame_ind = self.video_to_image_map[video_identifier][img_id]
         stride = 1
-        
+
         if self.min_frame_dist is None:
             min_frame_dist = self.opt.min_frame_dist
         else:
@@ -488,6 +609,27 @@ class VideoDataset(GenericDataset):
         img_infos = []
         img_paths = []
         for image_info in selected_images:
+            img, ann, img_info, img_path = self._load_image_anns(image_info['id'], coco, img_dir)
+            imgs.append(img)
+            anns.append(ann)
+            img_infos.append(img_info)
+            img_paths.append(img_path)
+
+        return imgs, anns, img_infos, img_paths
+
+    def _load_event_data(self, index, input_len):
+        coco = self.coco
+        img_dir = self.img_dir
+        img_id = self.images[index]
+        img_ids = list(range(img_id, img_id+input_len))
+        image_infos = coco.loadImgs(ids=img_ids)
+
+        # load frames and annotations for the clip
+        imgs = []
+        anns = []
+        img_infos = []
+        img_paths = []
+        for image_info in image_infos:
             img, ann, img_info, img_path = self._load_image_anns(image_info['id'], coco, img_dir)
             imgs.append(img)
             anns.append(ann)

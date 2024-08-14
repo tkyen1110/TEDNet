@@ -27,7 +27,7 @@ def generic_post_process(
   for i in range(len(dets['scores'])):
     preds = []
     trans = get_affine_transform(
-      c[i], s[i], 0, (w, h), inv=1).astype(np.float32)
+      c[i], s[i], 0, (w[i], h[i]), inv=1).astype(np.float32)
     for j in range(len(dets['scores'][i])):
       if dets['scores'][i][j] < opt.out_thresh:
         break
@@ -49,10 +49,14 @@ def generic_post_process(
         item['bbox'] = bbox
 
       if 'visibility' in dets:
+        # TODO
+        '''
         if dets['visibility'][i][j] > opt.visibility_thresh_eval:
           item['visibility'] = True
         else:
           item['visibility'] = False
+        '''
+        item['visibility'] = dets['visibility'][i][j][0]
 
       if 'hps' in dets:
         pts = transform_preds_with_trans(

@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 # Code referenced from https://gist.github.com/gyglim/1f8dfb1b5c82627ae3efcfbbadb9f514
+# https://pytorch.org/tutorials/intermediate/tensorboard_profiler_tutorial.html
 import os
 import time
 import sys
@@ -16,13 +17,20 @@ except:
   USE_TENSORBOARD = False
 
 class Logger(object):
-  def __init__(self, opt):
+  def __init__(self, opt, rank=0):
     """Create a summary writer logging to log_dir."""
     if not os.path.exists(opt.save_dir):
-      os.makedirs(opt.save_dir)
+      os.makedirs(opt.save_dir, exist_ok=True)
     if not os.path.exists(opt.debug_dir):
-      os.makedirs(opt.debug_dir)
-   
+      os.makedirs(opt.debug_dir, exist_ok=True)
+
+    if opt.dataset_version != 'train' and opt.save_videos and not os.path.exists(opt.video_dir):
+      os.makedirs(opt.video_dir, exist_ok=True)
+    if opt.dataset_version != 'train' and opt.save_videos_dcn3d and not os.path.exists(opt.video_dcn3d_dir):
+      os.makedirs(opt.video_dcn3d_dir, exist_ok=True)
+    if opt.dataset_version != 'train' and not os.path.exists(opt.dt_dir):
+      os.makedirs(opt.dt_dir, exist_ok=True)
+
     time_str = time.strftime('%Y-%m-%d-%H-%M')
 
     args = dict((name, getattr(opt, name)) for name in dir(opt)
@@ -38,7 +46,8 @@ class Logger(object):
       for k, v in sorted(args.items()):
         opt_file.write('  %s: %s\n' % (str(k), str(v)))
           
-    log_dir = opt.save_dir + '/logs_{}'.format(time_str)
+    log_dir = opt.save_dir + '/logs_{}/rank_{}'.format(time_str, rank)
+
     if USE_TENSORBOARD:
       self.writer = tensorboardX.SummaryWriter(log_dir=log_dir)
     else:

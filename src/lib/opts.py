@@ -107,6 +107,9 @@ class opts(object):
     self.parser.add_argument('--freeze_gru', action='store_true')
     self.parser.add_argument('--gru_filter_size', type=int, default=3)
     self.parser.add_argument('--num_gru_layers', type=int, default=1)
+    self.parser.add_argument('--dcn_3d_aggregation', action='store_true')
+    self.parser.add_argument('--conv_3d_aggregation', action='store_true')
+    self.parser.add_argument('--temporal_aggregation', action='store_true')
 
     # input
     self.parser.add_argument('--input_res', type=int, default=-1, 
@@ -170,6 +173,7 @@ class opts(object):
     self.parser.add_argument('--not_sup_invis_boxes', action='store_true', 
                              help='disable box loss for invisibel objects')
     self.parser.add_argument('--visibility', action='store_true', help='introduce binary visibility head')
+    self.parser.add_argument('--consistency', action='store_true', help='introduce consistency head')
     self.parser.add_argument('--invis_hm_weight', type=float, default=1,
                              help='hm loss weight for inviible objects')
     self.parser.add_argument('--use_occl_len', action='store_true')
@@ -202,6 +206,10 @@ class opts(object):
     self.parser.add_argument('--depth_scale', type=float, default=1,
                              help='')
     self.parser.add_argument('--save_results', action='store_true')
+    self.parser.add_argument('--save_videos', action='store_true')
+    self.parser.add_argument('--save_videos_dcn3d', action='store_true')
+    self.parser.add_argument('--save_npys', action='store_true')
+    self.parser.add_argument('--selected_files', nargs='+', default=[])
     self.parser.add_argument('--load_results', default='')
     self.parser.add_argument('--use_loaded_results', action='store_true')
     self.parser.add_argument('--ignore_loaded_cats', default='')
@@ -219,6 +227,8 @@ class opts(object):
                              help='visualize heatmaps instead of boxes')
     self.parser.add_argument('--test_with_loss', action='store_true',
                              help='Output losses during testing.')
+    self.parser.add_argument('--time_profiling', action='store_true',
+                             help='time profiling.')
 
     # dataset
     self.parser.add_argument('--not_rand_crop', action='store_true',
@@ -244,6 +254,8 @@ class opts(object):
     self.parser.add_argument('--no_color_aug', action='store_true',
                              help='not use the color augmenation '
                                   'from CornerNet')
+    self.parser.add_argument('--annotations_dir', default='annotations', help='')
+    self.parser.add_argument('--post_input', action='store_true', help='for post-processed input')
 
     # Tracking
     self.parser.add_argument('--tracking', action='store_true')
@@ -295,6 +307,7 @@ class opts(object):
     self.parser.add_argument('--velocity', action='store_true')
     self.parser.add_argument('--velocity_weight', type=float, default=1)
     self.parser.add_argument('--visibility_weight', type=float, default=1)
+    self.parser.add_argument('--consistency_weight', type=float, default=1)
 
     # custom dataset
     self.parser.add_argument('--custom_dataset_img_path', default='')
@@ -321,9 +334,11 @@ class opts(object):
       [int(i) for i in opt.ignore_loaded_cats.split(',')] \
       if opt.ignore_loaded_cats != '' else []
 
-    opt.num_workers = max(opt.num_workers, 2 * len(opt.gpus))
+    opt.num_workers = min(opt.num_workers, 2 * len(opt.gpus))
     opt.pre_img = False
-    if 'tracking' in opt.task:
+    if 'notracking' in opt.task:
+      opt.tracking = False
+    elif 'tracking' in opt.task:
       print('Running tracking')
       opt.tracking = True
       opt.out_thresh = max(opt.track_thresh, opt.out_thresh)
@@ -353,22 +368,36 @@ class opts(object):
         slave_chunk_size += 1
       opt.chunk_sizes.append(slave_chunk_size)
     print('training chunk_sizes:', opt.chunk_sizes)
-
+    # '''
     if opt.debug > 0:
       opt.num_workers = 0
-      opt.batch_size = 1
+      # opt.batch_size = 1
       opt.gpus = [opt.gpus[0]]
       opt.master_batch_size = -1
-
+    # '''
     # log dirs
     opt.root_dir = os.path.join(os.path.dirname(__file__), '..', '..')
     opt.data_dir = os.path.join(opt.root_dir, 'data')
     opt.exp_dir = os.path.join(opt.root_dir, 'exp', opt.task)
     opt.save_dir = os.path.join(opt.exp_dir, opt.exp_id)
-    opt.debug_dir = os.path.join(opt.save_dir, 'debug')
-    
+
     if opt.resume and opt.load_model == '':
       opt.load_model = os.path.join(opt.save_dir, 'model_last.pth')
+
+    if opt.load_model == '':
+      opt.debug_dir = os.path.join(opt.save_dir, 'debug')
+    else:
+      model_name = os.path.splitext(os.path.basename(opt.load_model))[0]
+      opt.debug_dir = os.path.join(opt.save_dir, model_name)
+
+    if opt.dataset_version != 'train':
+      opt.video_dir = os.path.join(opt.debug_dir, 'video')
+      opt.video_dcn3d_dir = os.path.join(opt.debug_dir, 'video_dcn3d')
+      if opt.post_input:
+        opt.dt_dir = os.path.join(opt.debug_dir, 'dt_post')
+      else:
+        opt.dt_dir = os.path.join(opt.debug_dir, 'dt')
+
     return opt
 
 
@@ -387,7 +416,9 @@ class opts(object):
   
     opt.heads = {'hm': opt.num_classes, 'reg': 2, 'wh': 2}
 
-    if 'tracking' in opt.task:
+    if 'notracking' in opt.task:
+      pass
+    elif 'tracking' in opt.task:
       opt.heads.update({'tracking': 2})
 
     if 'ddd' in opt.task:
@@ -400,6 +431,9 @@ class opts(object):
 
     if opt.visibility:
       opt.heads.update({'visibility': 1})
+
+    if opt.consistency:
+      opt.heads.update({'consistency': 1})
 
     if opt.ltrb:
       opt.heads.update({'ltrb': 4})
@@ -420,7 +454,9 @@ class opts(object):
                    'tracking': opt.tracking_weight,
                    'ltrb_amodal': opt.ltrb_amodal_weight,
                    'nuscenes_att': opt.nuscenes_att_weight,
-                   'velocity': opt.velocity_weight, 'visibility': opt.visibility_weight}
+                   'velocity': opt.velocity_weight, 'visibility': opt.visibility_weight,
+                   'consistency': opt.consistency_weight}
+
     opt.weights = {head: weight_dict[head] for head in opt.heads}
     for head in opt.weights:
       if opt.weights[head] == 0:

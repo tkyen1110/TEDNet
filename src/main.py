@@ -17,6 +17,7 @@ from dataset.dataset_factory import get_dataset
 from dataset.datasets.pd_tracking import PDTracking
 from trainer import Trainer
 from dataset.joint_loader import JointLoader
+from utils.distributed_sampler import DistributedSampler
 
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -81,7 +82,7 @@ def launch_test(opt):
 def train(rank, opt, Dataset):
   setup(rank, len(opt.gpus))
 
-  logger = Logger(opt)
+  logger = Logger(opt, rank)
 
   if rank == 0:
     group_name = opt.dataset
@@ -110,20 +111,39 @@ def train(rank, opt, Dataset):
   trainer = Trainer(opt, model, optimizer)
   trainer.set_device(opt.gpus, opt.chunk_sizes, rank)
   
-
+  print('start_epoch = ', start_epoch)
   print('Setting up train data...')
   train_sampler = None
   if opt.dataset != 'joint':
     train_dataset = Dataset(opt, 'train')
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-    	train_dataset,
-    	num_replicas=len(opt.gpus),
-    	rank=rank
-    )
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=opt.batch_size, shuffle=False,
-        num_workers=4, pin_memory=True, sampler=train_sampler
-    )
+    if train_dataset.event_data:
+      train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=len(opt.gpus),
+        rank=rank,
+        shuffle=True,
+        drop_last=False,
+        batch_size=opt.batch_size,
+        seqs_per_video=train_dataset.seqs_per_video
+      )
+
+      # num_workers = 0: VideoDataset.__getitem__() uses global dict to store pre_anns and pre_invis_anns
+      # num_workers > 0: VideoDataset.__getitem__() uses DistributedSampler to generate seeds for each video
+      train_loader = torch.utils.data.DataLoader(
+          train_dataset, batch_size=opt.batch_size, shuffle=False,
+          num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler
+      )
+    else:
+      train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset,
+        num_replicas=len(opt.gpus),
+        rank=rank
+      )
+
+      train_loader = torch.utils.data.DataLoader(
+          train_dataset, batch_size=opt.batch_size, shuffle=False,
+          num_workers=4, pin_memory=True, sampler=train_sampler
+      )
   else:
     dataset1 = Dataset(opt, 'train')
     dataset1.input_len = 2
@@ -165,6 +185,12 @@ def train(rank, opt, Dataset):
     train_sampler = [train_sampler1, train_sampler2]
 
     train_loader = JointLoader(train_loader1, train_loader2)
+
+  '''
+  for iter_id, batch in enumerate(train_loader):
+    if rank == 0:
+      print(rank, iter_id, torch.stack([batch[i]['video_id'] for i in range(len(batch))], dim=1), torch.stack([batch[i]['frame_id'] for i in range(len(batch))], dim=1))
+  '''
 
   print('Starting training...')
   for epoch in range(start_epoch + 1, opt.num_epochs + 1):
@@ -233,21 +259,21 @@ def train(rank, opt, Dataset):
 
 
 def main(opt):
+  if not opt.not_set_cuda_env:
+    os.environ['CUDA_VISIBLE_DEVICES'] = opt.gpus_str
   if opt.dataset != 'joint':
     Dataset = get_dataset(opt.dataset)
   else:
     Dataset = get_dataset(opt.dataset1)
   opt = opts().update_dataset_info_and_set_heads(opt, Dataset)
   print(opt)
-  if not opt.not_set_cuda_env:
-    os.environ['CUDA_VISIBLE_DEVICES'] = opt.gpus_str
   
   torch.manual_seed(opt.seed)
   torch.backends.cudnn.benchmark = not opt.not_cuda_benchmark and not opt.test
   opt.device = torch.device('cuda' if opt.gpus[0] >= 0 else 'cpu')
-  
-  mp.spawn(train, nprocs=len(opt.gpus), args=(opt, Dataset,))   
+  mp.spawn(train, nprocs=len(opt.gpus), args=(opt, Dataset,))
 
 if __name__ == '__main__':
   opt = opts().parse()
+  opt.save_point = list(range(opt.num_epochs))
   main(opt)

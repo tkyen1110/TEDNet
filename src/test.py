@@ -17,8 +17,11 @@ from logger import Logger
 from utils.utils import AverageMeter
 from dataset.dataset_factory import dataset_factory
 from detector import Detector
+from utils.test_sampler import TestSampler
 import math
-
+import h5py
+from metavision_core.event_io.py_reader import EventDatReader
+from metavision_sdk_core import BaseFrameGenerationAlgorithm
 
 class PrefetchDataset(torch.utils.data.Dataset):
   def __init__(self, opt, dataset, pre_process_func):
@@ -28,13 +31,47 @@ class PrefetchDataset(torch.utils.data.Dataset):
     self.pre_process_func = pre_process_func
     self.get_default_calib = dataset.get_default_calib
     self.opt = opt
-  
-  def __getitem__(self, index):
 
+  def __getitem__(self, index):
     img_id = self.images[index]
     img_info = self.load_image_func(ids=[img_id])[0]
-    img_path = os.path.join(self.img_dir, img_info['file_name'])
-    image = cv2.imread(img_path)
+    if self.opt.post_input:
+      folder, file = img_info['file_name'].split('/')
+      folder = folder + '_post'
+      img_path = os.path.join(self.img_dir, folder, file)
+    else:
+      img_path = os.path.join(self.img_dir, img_info['file_name'])
+
+    if 'gen4' in self.opt.dataset:
+      frame_id = img_info['frame_id']
+      with h5py.File(img_path, 'r') as h5file:
+        image = h5file['data'][frame_id]
+        image = np.transpose(image, (1, 2, 0))
+        h5_data_attrs = h5file['data'].attrs
+        delta_t = h5_data_attrs['delta_t']
+        ev_height = h5_data_attrs['event_input_height']
+        ev_width = h5_data_attrs['event_input_width']
+        c, h5_height, h5_width = h5_data_attrs['shape']
+        downsample = int(np.log2(ev_height//h5_height))
+
+      if self.opt.save_videos:
+        img_dir, img_name = os.path.split(img_path)
+        img_dir = img_dir + "_dat"
+        img_name = img_name.replace(".h5", "_td.dat")
+        img_path = os.path.join(img_dir, img_name)
+        event_dat = EventDatReader(img_path)
+        event_dat.seek_time(img_info['frame_id']*delta_t)
+        events = event_dat.load_delta_t(delta_t=delta_t)
+        if downsample > 0:
+            events['x'] = events['x'] >> downsample
+            events['y'] = events['y'] >> downsample
+        image_vis = np.zeros((h5_height, h5_width, 3), dtype=np.uint8)
+        BaseFrameGenerationAlgorithm.generate_frame(events, image_vis)
+      else:
+        image_vis = np.zeros((h5_height, h5_width, 3), dtype=np.uint8)
+    else:
+      image = cv2.imread(img_path)
+      image_vis = image.copy()
 
     images, meta = {}, {}
     for scale in opt.test_scales:
@@ -44,10 +81,24 @@ class PrefetchDataset(torch.utils.data.Dataset):
       input_meta['calib'] = calib
       images[scale], meta[scale] = self.pre_process_func(
         image, scale, input_meta)
-    ret = {'images': images, 'image': image, 'meta': meta}
-    if 'frame_id' in img_info and img_info['frame_id'] == 1:
+    ret = {'images': images, 'image': image, 'image_vis': image_vis, 'meta': meta}
+    if 'gen4' in self.opt.dataset:
+      first_frame_id = 0
+      ret['frame_id'] = img_info['frame_id']
+      ret['delta_t'] = int(delta_t)
+    else:
+      first_frame_id = 1
+    if 'frame_id' in img_info and img_info['frame_id'] == first_frame_id:
       ret['is_first_frame'] = 1
-      ret['video_id'] = img_info['video_id']
+    else:
+      ret['is_first_frame'] = 0
+
+    ret['video_id'] = img_info['video_id']
+    if 'gen4' in self.opt.dataset:
+      video_name = os.path.basename(img_info['file_name'])
+      video_name = os.path.splitext(video_name)[0]
+      ret['video_name'] = video_name
+
     return img_id, ret
 
   def __len__(self):
@@ -74,9 +125,15 @@ def prefetch_test(opt):
   else:
     load_results = {}
 
+  test_sampler = TestSampler(
+    dataset,
+    batch_size=opt.batch_size,
+    seqs_per_video=dataset.seqs_per_video
+  )
   data_loader = torch.utils.data.DataLoader(
     PrefetchDataset(opt, dataset, detector.pre_process), 
-    batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+    batch_size=opt.batch_size, shuffle=False, num_workers=0, pin_memory=True, 
+    sampler=test_sampler)
 
   results = {}
   num_iters = len(data_loader) if opt.num_iters < 0 else opt.num_iters
@@ -87,35 +144,43 @@ def prefetch_test(opt):
     for img_id in data_loader.dataset.images:
       results[img_id] = load_results['{}'.format(img_id)]
     num_iters = 0
-  for ind, (img_id, pre_processed_images) in enumerate(data_loader):
 
+  for ind, (img_ids, pre_processed_images) in enumerate(data_loader):
     if ind >= num_iters:
       break
-    if opt.tracking and ('is_first_frame' in pre_processed_images):
-      if '{}'.format(int(img_id.numpy().astype(np.int32)[0])) in load_results:
-        pre_processed_images['meta']['pre_dets'] = \
-          load_results['{}'.format(int(img_id.numpy().astype(np.int32)[0]))]
-      else:
-        print('No pre_dets for', int(img_id.numpy().astype(np.int32)[0]), 
-          '. Use empty initialization.')
-        pre_processed_images['meta']['pre_dets'] = []
-      detector.reset_tracking()
-      print('Start tracking video', int(pre_processed_images['video_id']))
+    assert torch.all(pre_processed_images['is_first_frame']==1) or torch.all(pre_processed_images['is_first_frame']==0)
+    if opt.tracking and ('is_first_frame' in pre_processed_images and torch.all(pre_processed_images['is_first_frame'])):
+      for img_id in img_ids:
+        img_id = int(img_id.numpy().astype(np.int32))
+        if '{}'.format(img_id) in load_results:
+          pre_processed_images['meta']['pre_dets'] = \
+            load_results['{}'.format(img_id)]
+        else:
+          print('No pre_dets for', img_id, 
+            '. Use empty initialization.')
+          pre_processed_images['meta']['pre_dets'] = []
+        detector.reset_tracking()
+      print('Start tracking video', pre_processed_images['video_id'].tolist())
     if opt.public_det:
-      if '{}'.format(int(img_id.numpy().astype(np.int32)[0])) in load_results:
-        pre_processed_images['meta']['cur_dets'] = \
-          load_results['{}'.format(int(img_id.numpy().astype(np.int32)[0]))]
-      else:
-        print('No cur_dets for', int(img_id.numpy().astype(np.int32)[0]))
-        pre_processed_images['meta']['cur_dets'] = []
+      for img_id in img_ids:
+        img_id = int(img_id.numpy().astype(np.int32))
+        if '{}'.format(img_id) in load_results:
+          pre_processed_images['meta']['cur_dets'] = \
+            load_results['{}'.format(img_id)]
+        else:
+          print('No cur_dets for', img_id)
+          pre_processed_images['meta']['cur_dets'] = []
+  
+    rets = detector.run(pre_processed_images)
 
-    ret = detector.run(pre_processed_images)
-    results[int(img_id.numpy().astype(np.int32)[0])] = ret['results']
-    
+    for b, img_id in enumerate(img_ids):
+      img_id = int(img_id.numpy().astype(np.int32))
+      results[img_id] = rets[b]['results']
+
     Bar.suffix = '[{0}/{1}]|Tot: {total:} |ETA: {eta:} '.format(
                    ind, num_iters, total=bar.elapsed_td, eta=bar.eta_td)
     for t in avg_time_stats:
-      avg_time_stats[t].update(ret[t])
+      avg_time_stats[t].update(rets[0][t])
       Bar.suffix = Bar.suffix + '|{} {tm.val:.3f}s ({tm.avg:.3f}s) '.format(
         t, tm = avg_time_stats[t])
     if opt.print_iter > 0:
@@ -123,6 +188,7 @@ def prefetch_test(opt):
         print('{}/{}| {}'.format(opt.task, opt.exp_id, Bar.suffix))
     else:
       bar.next()
+  detector.close_video()
   bar.finish()
   if opt.save_results:
     print('saving results to', opt.save_dir + '/save_results_{}{}.json'.format(
@@ -130,7 +196,7 @@ def prefetch_test(opt):
     json.dump(_to_list(copy.deepcopy(results)), 
               open(opt.save_dir + '/save_results_{}{}.json'.format(
                 opt.test_dataset, opt.dataset_version), 'w'))
-  dataset.run_eval(results, opt.save_dir, opt.write_to_file, opt.dataset_version)
+  # dataset.run_eval(results, opt.save_dir, opt.write_to_file, opt.dataset_version)
 
 def test_with_loss(opt):
   if not opt.not_set_cuda_env:

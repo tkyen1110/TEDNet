@@ -51,6 +51,7 @@ class BaseModel(nn.Module):
           if opt.pre_hm:
               in_channel += 1
           self.conv_gru = ConvGRU(in_channel, last_channel, (opt.gru_filter_size, opt.gru_filter_size), opt.num_gru_layers, batch_first=True, nl=opt.nl)
+          self.h = None
 
         self.heads = heads
         for head in self.heads:
@@ -110,12 +111,12 @@ class BaseModel(nn.Module):
       for parameter in self.conv_gru.parameters():
           parameter.requires_grad = False    
     
-    def imgpre2feats(self, x, pre_img=None, pre_hm=None):
+    def imgpre2feats(self, x, pre_img=None, pre_hm=None, reset_dcn_3d=False):
       raise NotImplementedError
 
-    def step(self, x, h):
-      feats = self.imgpre2feats(x, None, torch.zeros(1))
-
+    def step(self, x, h, video_names=[]):
+      reset_dcn_3d = (h == None)
+      feats = self.imgpre2feats(x, None, torch.zeros(1), reset_dcn_3d=reset_dcn_3d, video_names=video_names)
       batch_size = int(len(feats[0]))
       inp = feats[0].view(batch_size, 1, feats[0].size(1), feats[0].size(2), feats[0].size(3))
 
@@ -141,9 +142,9 @@ class BaseModel(nn.Module):
 
       return z
 
-    def forward(self, x, pre_img=None, pre_hm=None, batch_size=1):
+    def forward(self, x, pre_img=None, pre_hm=None, batch_size=1, reset_gru_state=True):
       if (pre_hm is not None) or (pre_img is not None):
-        feats = self.imgpre2feats(x, pre_img, pre_hm)
+        feats = self.imgpre2feats(x, pre_img, pre_hm, reset_dcn_3d=reset_gru_state)
       else:
         feats = self.img2feats(x)
       
@@ -160,17 +161,22 @@ class BaseModel(nn.Module):
 
             input_len = int(len(feats[s]) / batch_size)
             inp = feats[s].view(batch_size, input_len, feats[s].size(1), feats[s].size(2), feats[s].size(3))
-            hm = torch.zeros(batch_size, 1, inp.size(3), inp.size(4)).cuda()
-            h = None
+
+            hm = torch.zeros(batch_size, 1, inp.size(3), inp.size(4)).cuda() # hm.shape = torch.Size([1, 1, 96, 240])
+            if reset_gru_state:
+              self.h = None
+            else:
+              self.h = [ht.detach_() for ht in self.h]
+
             pre_hms = []
             # process a batch of frames one by one
             for i in range(inp.size(1)):
               curr_step = inp[:, i, :, :, :]
               if self.opt.pre_hm:
                 curr_step = torch.cat((curr_step, hm), 1)
-              intermediate_outputs, layer_reset_list, layer_update_list, last_output = self.conv_gru(curr_step.unsqueeze(1), h)
-              h = last_output
-              feats[s] = last_output[-1:][0]
+              intermediate_outputs, layer_reset_list, layer_update_list, last_output = self.conv_gru(curr_step.unsqueeze(1), self.h)
+              self.h = last_output
+              feats[s] = last_output[-1:][0] # feats[s].shape = torch.Size([1, 64, 96, 240])
 
               z = {}
               z = self.apply_heads(feats[s], z)

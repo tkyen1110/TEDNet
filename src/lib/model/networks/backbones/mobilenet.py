@@ -11,7 +11,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
-from torchvision.models.utils import load_state_dict_from_url
+# from torchvision.models.utils import load_state_dict_from_url
+from torch.hub import load_state_dict_from_url
 
 BN_MOMENTUM = 0.1
 

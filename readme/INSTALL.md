@@ -1,18 +1,18 @@
 # Installation
 
 
-1. We provide a Docker file to re-create the environment which was used in our experiments under `$PermaTrack_ROOT/docker/Dockerfile`. You can either configure the environment yourself using the docker file as a guide or build it via:
+1. We provide a Docker file to build the environment under `$TEDNet_ROOT/docker/Dockerfile`. You can build the environment via the scripts below:
   ~~~
-    cd $PermaTrack_ROOT
-    make docker-build
-    make docker-start-interactive
+    cd $TEDNet_ROOT/docker
+    ./docker_exec.sh build
+    ./docker_exec.sh run
   ~~~ 
 
-2. The only step that has to be done manually is compiling of deformabel convolutions module.
-
+2. The only step that has to be done manually is compiling of deformable convolutions module.
   ~~~
-    cd $PermaTrack_ROOT/src/lib/model/networks/
-    git clone https://github.com/CharlesShang/DCNv2/ 
+    cd $TEDNet_ROOT/src/lib/model/networks/
+    git clone https://github.com/lbin/DCNv2.git
     cd DCNv2
-    ./make.sh
+    git checkout pytorch_1.11
+    sudo ./make.sh
   ~~~

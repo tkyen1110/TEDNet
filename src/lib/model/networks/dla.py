@@ -7,6 +7,7 @@ import math
 import logging
 import numpy as np
 from os.path import join
+import cv2
 
 import torch
 from torch import nn
@@ -20,7 +21,7 @@ try:
 except:
     print('import DCN failed')
     DCN = None
-
+from dcn.modules.deform_conv import DeformConv_d, _DeformConv, DeformConvPack_d
 
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
@@ -235,8 +236,16 @@ class DLA(nn.Module):
         super(DLA, self).__init__()
         self.channels = channels
         self.num_classes = num_classes
+
+        if 'gen4' in opt.dataset:
+            inp_channels = 10
+            self.event_data = True
+        else:
+            inp_channels = 3
+            self.event_data = False
+
         self.base_layer = nn.Sequential(
-            nn.Conv2d(3, channels[0], kernel_size=7, stride=1,
+            nn.Conv2d(inp_channels, channels[0], kernel_size=7, stride=1,
                       padding=3, bias=False),
             nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM),
             nn.ReLU(inplace=True))
@@ -599,6 +608,14 @@ class DLASeg(BaseModel):
             heads, head_convs, 1, 64 if num_layers == 34 else 128, opt=opt)
         down_ratio=4
         self.opt = opt
+        self.dcn_3d_aggregate = opt.dcn_3d_aggregation
+        self.conv_3d_aggregate = opt.conv_3d_aggregation
+        assert not (self.dcn_3d_aggregate and self.conv_3d_aggregate)
+        self.save_videos_dcn3d = opt.save_videos_dcn3d
+        if self.save_videos_dcn3d:
+            self.video_dcn3d_dir = opt.video_dcn3d_dir
+        self.temporal_aggregate = opt.temporal_aggregation
+
         self.node_type = DLA_NODE[opt.dla_node]
         print('Using node type:', self.node_type)
         self.first_level = int(np.log2(down_ratio))
@@ -618,6 +635,29 @@ class DLASeg(BaseModel):
             [2 ** i for i in range(self.last_level - self.first_level)],
             node_type=self.node_type)
 
+        if self.dcn_3d_aggregate:
+            kT, kH, kW = 2, 3, 3
+            sT, sH, sW = 1, 1, 1
+            pT, pH, pW = 0, 1, 1
+            self.dcn_3d = DeformConvPack_d(10, 10, kernel_size=[kT, kH, kW], stride=[sT, sH, sW],padding=[pT, pH, pW],dimension='THW')
+            self.dcn_history = None
+            self.aggr_history = None
+
+        if self.conv_3d_aggregate:
+            kT, kH, kW = 2, 3, 3
+            sT, sH, sW = 1, 1, 1
+            pT, pH, pW = 0, 1, 1
+            self.dcn_3d = nn.Conv3d(10, 10, kernel_size=[kT, kH, kW], stride=[sT, sH, sW],padding=[pT, pH, pW])
+            self.dcn_history = None
+            self.aggr_history = None
+
+        if self.temporal_aggregate:
+            assert self.dcn_3d_aggregate or self.conv_3d_aggregate
+            self.conv2d_1 = nn.Conv2d(in_channels=10, out_channels=10, kernel_size=1, bias=True)
+            self.conv2d_2 = nn.Conv2d(in_channels=10, out_channels=1, kernel_size=1, bias=True)
+            self.sigmoid = nn.Sigmoid()
+            self.timemap = None
+
     def freeze_backbone(self):
         for parameter in self.base.parameters():
             parameter.requires_grad = False    
@@ -629,7 +669,7 @@ class DLASeg(BaseModel):
             parameter.requires_grad = False  
 
     def do_tensor_pass(self, x, pre_img, pre_hm):
-        x = self.base(x, pre_img, pre_hm)
+        x = self.base(x, pre_img, pre_hm) # TODO
         x = self.dla_up(x)
 
         y = []
@@ -650,7 +690,119 @@ class DLASeg(BaseModel):
 
         return [y[-1]]
 
-    def imgpre2feats(self, x, pre_img=None, pre_hm=None):
+    def dcn_3d_aggregation(self, inp, inp_history):
+        B, T, C, H, W = inp.shape
+        inp = inp.view(B, C, T, H, W)
+        inp_history = inp_history.view(B, C, T, H, W)
+        inp_cat = torch.cat((inp, inp_history), 2)
+        out = self.dcn_3d(inp_cat)
+        out = out.view(B, T, C, H, W)
+        return out
+
+    def temporal_aggregation(self, inp, inp_history):
+        mask = (inp!=0)
+        mask = (torch.sum(mask, dim=2, keepdim=True) > 0)
+        aggr_history = torch.logical_not(mask) * inp_history + mask * inp
+        return aggr_history
+
+    def feature_map_to_image(self, input, feature_map, frame_counts, delta_t=50000, choice='all'):
+        C, H, W = feature_map.shape
+        feature_map = feature_map.cpu().data.numpy()
+        choices = ['all', 'range','max', 'bin', 'gray', 'pos', 'neg']
+        assert choice in choices
+
+        input = input.cpu().data.numpy()
+        input_mask = (input!=0)                         # shape = [C, H, W]
+        input_mask = (np.sum(input_mask, axis=0) > 0)    # shape = [H, W]
+        input_mask = input_mask.astype('uint8') * 255
+
+        if choice == 'range':
+            image = np.zeros((H*10, W*10, 3) ,dtype=np.uint8)
+
+            for c in range(C):
+                range_min = np.min(feature_map[c, ...])
+                range_max = np.max(feature_map[c, ...])
+                interval = (range_max - range_min) / 10
+                for i in range(10):
+                    mask = ((feature_map[c, ...]>=range_min+interval*i) & (feature_map[c, ...]<=range_min+interval*(i+1))).astype('uint8') * 255
+                    row = c
+                    col = i
+                    image[row*H:(row+1)*H, col*W:(col+1)*W, :] = np.stack([mask]*3, axis=2).copy()
+                    cv2.putText(image[row*H:(row+1)*H, col*W:(col+1)*W, :], '{} ms / {} ms'.format(frame_counts*delta_t//1000, (frame_counts+1)*delta_t//1000), 
+                            (W-200, 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+                    if c == C -1:
+                        image = cv2.line(image, (W*i,0), (W*i,H*10), (0,0,255), 2)
+                image = cv2.line(image, (0,H*c), (W*10,H*c), (0,0,255), 2)
+            image = cv2.line(image, (0,H*C), (W*10,H*C), (0,0,255), 1)
+            image = cv2.line(image, (W*10,0), (W*10,H*10), (0,0,255), 2)
+        else:
+            image = np.zeros((H*4, W*3, 3) ,dtype=np.uint8)
+
+            if choice == 'max':
+                m = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+                max_map = m(torch.from_numpy(feature_map))
+                max_map = max_map.numpy()
+
+            for c in range(C):
+                if choice == 'all':
+                    feature_map[c, ...] = np.abs(feature_map[c, ...])
+                    fmin = np.min(feature_map[c, ...])
+                    fmax = np.max(feature_map[c, ...])
+                    mask = (feature_map[c, ...] - fmin) / (fmax - fmin) * 255
+                    mask = mask.astype('uint8')
+                    clahe = cv2.createCLAHE()
+                    mask = clahe.apply(mask)
+                elif choice == 'max':
+                    mask = (feature_map[c, ...] == max_map[c, ...]).astype('uint8') * 255
+                elif choice == 'bin':
+                    # mask = (feature_map[c, ...] != 0).astype('uint8') * 255 # shape = (H, W)
+                    mask = (np.abs(feature_map[c, ...]) > 0.01).astype('uint8') * 255 # shape = (H, W)
+                    # model_54 0
+                    # model_82 0.03
+                    # model_71 0.05
+                elif choice == 'gray':
+                    feature_map[c, ...] = feature_map[c, ...] * (np.abs(feature_map[c, ...]) >= 0.05)
+                    feature_map[c, ...] = np.abs(feature_map[c, ...])
+                    fmin = np.min(feature_map[c, ...])
+                    fmax = np.max(feature_map[c, ...])
+                    mask = (feature_map[c, ...] - fmin) / (fmax - fmin) * 255
+                elif choice == 'pos':
+                    feature_map[c, ...] = feature_map[c, ...] * (feature_map[c, ...] >= 0)
+                    fmin = np.min(feature_map[c, ...])
+                    fmax = np.max(feature_map[c, ...])
+                    mask = (feature_map[c, ...] - fmin) / (fmax - fmin) * 255
+                    mask = mask.astype('uint8')
+                    clahe = cv2.createCLAHE()
+                    mask = clahe.apply(mask)
+                elif choice == 'neg':
+                    feature_map[c, ...] = feature_map[c, ...] * (feature_map[c, ...] < 0)
+                    fmin = np.min(feature_map[c, ...])
+                    fmax = np.max(feature_map[c, ...])
+                    mask = 255 - (feature_map[c, ...] - fmin) / (fmax - fmin) * 255
+                    mask = mask.astype('uint8')
+                    clahe = cv2.createCLAHE()
+                    mask = clahe.apply(mask)
+                mask = mask.astype('uint8')
+
+                row = c // 3
+                col = c % 3
+                image[row*H:(row+1)*H, col*W:(col+1)*W, :] = np.stack([mask,mask,mask], axis=2).copy()
+                cv2.putText(image[row*H:(row+1)*H, col*W:(col+1)*W, :], '{} ms / {} ms'.format(frame_counts*delta_t//1000, (frame_counts+1)*delta_t//1000), 
+                        (W-200, 20), cv2.FONT_HERSHEY_TRIPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+                if c == C-1:
+                    ret_image = np.stack([mask[12:-12, :]], axis=2).copy()
+            col = 2
+            image[row*H:(row+1)*H, col*W:(col+1)*W, :] = np.stack([input_mask]*3, axis=2).copy()
+
+            image = cv2.line(image, (0,H*1), (W*3,H*1), (0,0,255), 1)
+            image = cv2.line(image, (0,H*2), (W*3,H*2), (0,0,255), 1)
+            image = cv2.line(image, (0,H*3), (W*3,H*3), (0,0,255), 1)
+            image = cv2.line(image, (W*1,0), (W*1,H*4), (0,0,255), 1)
+            image = cv2.line(image, (W*2,0), (W*2,H*4), (0,0,255), 1)
+
+        return image, ret_image
+
+    def imgpre2feats(self, x, pre_img=None, pre_hm=None, reset_dcn_3d=False, video_names=[]):
         if self.opt.is_recurrent:            
             if type(x) == list:
                 if 'depth' in x[0] and x[0]['depth'] is not None:
@@ -663,13 +815,94 @@ class DLASeg(BaseModel):
                         inp_len = len(x)
                     pre_img = depth_inp.view(len(x[0]['depth']) * inp_len, x[0]['depth'].size(1), x[0]['depth'].size(2), x[0]['depth'].size(3))
 
-                inp = x[0]['image'].unsqueeze(1)
-                for i in range(1, len(x)):
-                    inp = torch.cat((inp, x[i]['image'].unsqueeze(1)), 1)
+                if reset_dcn_3d:
+                    B, C, H, W = x[0]['image'].shape
+                    T = 1
+                    C = 1
+                    self.frame_counts = torch.tensor([0] * B)
+
+                if self.dcn_3d_aggregate or self.conv_3d_aggregate:
+                    if reset_dcn_3d:
+                        self.dcn_history = None
+                        self.aggr_history = None
+
+                    if self.temporal_aggregate:
+                        inp_history = None
+                        inp_history = x[0]['image'].unsqueeze(1)
+                        for i in range(1, len(x)):
+                            inp_history = torch.cat((inp_history, x[i]['image'].unsqueeze(1)), 1)
+
+                    if self.dcn_history == None:
+                        inp = x[0]['image'].unsqueeze(1)
+                        self.dcn_history = inp.clone()
+
+                        if self.temporal_aggregate:
+                            aggr_history = inp.clone()
+                            self.aggr_history = inp.clone()
+
+                        for i in range(1, len(x)):
+                            self.dcn_history = self.dcn_3d_aggregation(x[i]['image'].unsqueeze(1), self.dcn_history.detach())
+                            inp = torch.cat((inp, self.dcn_history), 1)
+                            if self.temporal_aggregate:
+                                self.aggr_history = self.temporal_aggregation(x[i]['image'].unsqueeze(1), self.aggr_history.detach())
+                                aggr_history = torch.cat((aggr_history, self.aggr_history), 1)
+                    else:
+                        inp = None
+                        aggr_history = None
+                        for i in range(0, len(x)):
+                            self.dcn_history = self.dcn_3d_aggregation(x[i]['image'].unsqueeze(1), self.dcn_history.detach())
+                            if inp == None:
+                                inp = self.dcn_history.clone()
+                            else:
+                                inp = torch.cat((inp, self.dcn_history), 1)
+
+                            if self.temporal_aggregate:
+                                self.aggr_history = self.temporal_aggregation(x[i]['image'].unsqueeze(1), self.aggr_history.detach())
+                                if aggr_history == None:
+                                    aggr_history = self.aggr_history.clone()
+                                else:
+                                    aggr_history = torch.cat((aggr_history, self.aggr_history), 1)
+                else:
+                    inp = x[0]['image'].unsqueeze(1)
+                    for i in range(1, len(x)):
+                        inp = torch.cat((inp, x[i]['image'].unsqueeze(1)), 1)
+
                 inp_len = 1
                 if not self.opt.stream_test:
                     # inp_len = self.opt.input_len
                     inp_len = len(x)
+
+                if self.temporal_aggregate:
+                    B, T, C, H, W = inp.shape
+                    inp = inp.view(B*T, C, H, W)
+                    inp = self.conv2d_1(inp)
+                    inp = self.conv2d_2(inp)
+                    inp = inp.view(B, T, 1, H, W)
+                    alpha = self.sigmoid(inp)
+                    inp = alpha * inp_history + (1 - alpha) * aggr_history
+
+                if self.save_videos_dcn3d:
+                    choice = 'all'
+                    if reset_dcn_3d:
+                        B, C, H, W = x[0]['image'].shape
+                        self.video_paths = [os.path.join(self.video_dcn3d_dir, video_name + '.avi') for video_name in video_names]
+                        self.image_paths = [os.path.join(self.video_dcn3d_dir, video_name + '_{}.jpg') for video_name in video_names]
+                        if choice == 'range':
+                            self.video_files = [cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc('M','J','P','G'), 10, (W*10, H*10)) for video_path in self.video_paths]
+                        else:
+                            self.video_files = [cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc('M','J','P','G'), 10, (W*3, H*4)) for video_path in self.video_paths]
+
+                    for b in range(inp.size(0)):
+                        for t in range(inp.size(1)):
+                            image, ret_image = self.feature_map_to_image(x[t]['image'][b], inp[b, t, ...], self.frame_counts[b], choice = choice)
+                            self.video_files[b].write(image)
+                            cv2.imwrite(self.image_paths[b].format(self.frame_counts[b]), ret_image)
+                            self.frame_counts[b] = self.frame_counts[b] + 1
+                            if self.frame_counts[b] == 1200:
+                                self.video_files[b].release()
+                else:
+                    self.frame_counts = self.frame_counts + 1
+
                 x = inp.view(len(x[0]['image']) * inp_len, x[0]['image'].size(1), x[0]['image'].size(2), x[0]['image'].size(3))
             else:
                 x = torch.stack((pre_img, x), 1).view(len(pre_img) * 2, pre_img.size(1), pre_img.size(2), pre_img.size(3))

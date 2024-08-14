@@ -12,6 +12,7 @@ from .datasets.mot import MOT
 from .datasets.crowdhuman import CrowdHuman
 from .datasets.kitti_tracking import KITTITracking
 from .datasets.pd_tracking import PDTracking
+from .datasets.gen4_tracking import Gen4Tracking
 from .datasets.custom_dataset import CustomDataset
 from .datasets.nuscenes_tracking import nuScenesTracking
 
@@ -21,7 +22,8 @@ dataset_factory = {
   'crowdhuman': CrowdHuman,
   'kitti_tracking': KITTITracking,
   'pd_tracking': PDTracking,
-  'nuscenes_tracking': nuScenesTracking
+  'gen4_tracking': Gen4Tracking,
+  'nuscenes_tracking': nuScenesTracking,
 }
 
 

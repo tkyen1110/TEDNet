@@ -3,6 +3,26 @@ from sklearn.utils.linear_assignment_ import linear_assignment
 from numba import jit
 import copy
 
+class BatchTracker(object):
+  def __init__(self, opt, batch_size):
+    self.batch_size = batch_size
+    self.tracker = [Tracker(opt) for i in range(batch_size)]
+
+  def init_track(self, results_list):
+    for b, results in enumerate(results_list):
+      self.tracker[b].init_track(results)
+
+  def reset(self):
+    for b in range(self.batch_size):
+      self.tracker[b].reset()
+
+  def step(self, results, public_det=None):
+    step_results = []
+    for b in range(self.batch_size):
+      step_result = self.tracker[b].step(results[b], public_det)
+      step_results.append(step_result)
+    return step_results
+
 class Tracker(object):
   def __init__(self, opt):
     self.opt = opt

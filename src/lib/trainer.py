@@ -49,6 +49,9 @@ class GenericLoss(torch.nn.Module):
 
     for s in range(opt.num_stacks):
       output = outputs[s]
+
+      if 'consistency' in output:
+        output['consistency'] = torch.exp(output['consistency'].relu() * (-1)) * torch.sqrt(torch.sum((output['tracking']**2), dim=1, keepdim=True))
       output = self._sigmoid_output(output)
 
       if 'hm' in output:
@@ -62,7 +65,13 @@ class GenericLoss(torch.nn.Module):
           output['visibility'], batch['visibility'], batch['visibility_ind'], 
           batch['visibility_mask'], batch['visibility_cat'])
         losses['visibility'] += tot_vis_loss / opt.num_stacks
-      
+
+      if 'consistency' in output:
+        tot_cons_loss = self.crit_reg(
+          output['consistency'], torch.unsqueeze(batch['visibility_mask'], 2), 
+          batch['ind'], output['visibility'])
+        losses['consistency'] += tot_cons_loss / opt.num_stacks
+
       regression_heads = [
         'reg', 'wh', 'tracking', 'ltrb', 'ltrb_amodal', 'hps', 
         'dep', 'dim', 'amodel_offset', 'velocity']
@@ -99,10 +108,11 @@ class GenericLoss(torch.nn.Module):
     return losses['tot'], losses
 
 class ModleWithLoss(torch.nn.Module):
-  def __init__(self, model, loss):
+  def __init__(self, model, loss, event_data=False):
     super(ModleWithLoss, self).__init__()
     self.model = model
     self.loss = loss
+    self.event_data = event_data
 
   def forward(self, batch, batch_size=1, stream=False, pre_gru_state=None, eval_mode=False):
     """ Forward function
@@ -125,6 +135,14 @@ class ModleWithLoss(torch.nn.Module):
     eval_mode: bool
       whether it is used for evaluation.
     """
+    if self.event_data:
+      assert torch.all(batch[0]['frame_id']==0) or torch.all(batch[0]['frame_id']!=0)
+      if torch.all(batch[0]['frame_id']==0):
+        reset_gru_state = True
+      else:
+        reset_gru_state = False
+    else:
+      reset_gru_state = True
 
     if type(batch) != list:
       pre_img = batch['pre_img'] if 'pre_img' in batch else None
@@ -145,7 +163,8 @@ class ModleWithLoss(torch.nn.Module):
       if stream and eval_mode:
         outputs, output_gru_state = self.model.step(batch, pre_gru_state)
       else:
-        outputs, pre_hm, batch = self.model(batch, pre_img, pre_hm, batch_size)
+        outputs, pre_hm, batch = self.model(batch, pre_img, pre_hm, batch_size, reset_gru_state)
+
       loss = None
       stats = []
 
@@ -170,7 +189,7 @@ class ModleWithLoss(torch.nn.Module):
 def get_losses(opt):
   loss_order = ['hm', 'wh', 'reg', 'ltrb', 'hps', 'hm_hp', \
       'hp_offset', 'dep', 'dim', 'rot', 'amodel_offset', \
-      'ltrb_amodal', 'tracking', 'nuscenes_att', 'velocity', 'visibility']
+      'ltrb_amodal', 'tracking', 'nuscenes_att', 'velocity', 'visibility', 'consistency']
   loss_states = ['tot'] + [k for k in loss_order if k in opt.heads]
   loss = GenericLoss(opt)
   return loss_states, loss
@@ -180,8 +199,9 @@ class Trainer(object):
     self, opt, model, optimizer=None):
     self.opt = opt
     self.optimizer = optimizer
+    self.event_data = 'gen4' in opt.dataset
     self.loss_stats, self.loss = get_losses(opt)
-    self.model_with_loss = ModleWithLoss(model, self.loss)
+    self.model_with_loss = ModleWithLoss(model, self.loss, self.event_data)
 
   def set_device(self, gpus, chunk_sizes, device):
     self.rank = device
@@ -230,10 +250,10 @@ class Trainer(object):
           if k != 'meta' and k!= 'gt_det' and k!= 'image_path':
             batch[k] = batch[k].to(device=opt.device, non_blocking=True) 
 
-      outputs, loss, loss_stats, pre_hms, batch = model_with_loss(batch, batch_size)  
+      outputs, loss, loss_stats, pre_hms, batch = model_with_loss(batch, batch_size)
       output = outputs[-1]
       prev_output = outputs[0]
-        
+
       loss = loss.mean()
       if phase == 'train':
         self.optimizer.zero_grad()

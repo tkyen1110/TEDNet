@@ -513,8 +513,8 @@ class TaoEval:
             tps = np.logical_and(dt_m != -1, np.logical_not(dt_ig))
             fps = np.logical_and(dt_m == -1, np.logical_not(dt_ig))
 
-            tp_sum = np.cumsum(tps, axis=1).astype(dtype=np.float)
-            fp_sum = np.cumsum(fps, axis=1).astype(dtype=np.float)
+            tp_sum = np.cumsum(tps, axis=1).astype(dtype=float)
+            fp_sum = np.cumsum(fps, axis=1).astype(dtype=float)
 
             dt_pointers[cat_idx][area_idx][time_idx] = {
                 "dt_ids": dt_ids,
