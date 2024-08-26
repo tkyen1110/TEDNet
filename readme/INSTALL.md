@@ -11,7 +11,7 @@
 2. The only step that has to be done manually is compiling of deformable convolution modules.
   ~~~
     cd $TEDNet_ROOT/src/lib/model/networks/
-    git clone https://github.com/lbin/DCNv2.git
+    git clone https://github.com/tkyen1110/DCNv2.git
     cd DCNv2
     git checkout pytorch_1.11
     sudo python setup.py build install

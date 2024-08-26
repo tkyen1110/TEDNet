@@ -18,7 +18,7 @@ Refer to [INSTALL.md](readme/INSTALL.md) for installation instructions.
 
 Follow the instructions in [DATA.md](readme/DATA.md) to setup the datasets.
 
-## Training and Evaluation
+## Training, Testing, and Evaluation
 
 Check [GETTING_STARTED.md](readme/GETTING_STARTED.md) to reproduce the results in the paper. We provide scripts for all the experiments in the [experiments](experiments) folder.
 

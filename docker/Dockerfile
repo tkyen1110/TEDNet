@@ -61,7 +61,7 @@ RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
 RUN pip install easydict scipy numpy pyquaternion matplotlib jupyter h5py \
     awscli nuscenes-devkit tqdm progress path.py pyyaml opencv-python \
     pycuda numba cython motmetrics scikit-learn==0.22.2 moviepy imageio yacs \
-    tensorboardX torch_tb_profiler thop
+    tensorboardX torch_tb_profiler thop hdf5plugin pycocotools==2.0.6
 
 # Install PyTorch
 RUN pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113 && \

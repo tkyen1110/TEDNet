@@ -1,10 +1,10 @@
 # Getting Started
 
-This document provides tutorials to train and evaluate TEDNet. Before getting started, make sure you have finished [installation](INSTALL.md) and [dataset setup](DATA.md).
+This document provides tutorials to train, test, and evaluate TEDNet. Before getting started, make sure you have finished [installation](INSTALL.md) and [dataset setup](DATA.md).
 
 ## Training
 
-We have packed all the training scripts in the [experiments](../experiments) folder. Each model is trained on 2 Nvidia 3090 GPUs with 24GB of memory where the pretrained weight relies on the existing [model](https://tri-ml-public.s3.amazonaws.com/github/permatrack/pd_17fr_21ep_vis.pth) trained on PD dataset and provided by PermaTrack. We provide our models in the ablation study [here](https://drive.google.com/drive/folders/11UIkJl7z0MKRFlNyGkS6sMS39aJbFSdc?usp=sharing).
+We have packed all the training scripts in the [experiments](../experiments) folder. Each model is trained on 2 Nvidia 3090 GPUs with 24GB of memory where the pretrained weight relies on the existing [model](https://tri-ml-public.s3.amazonaws.com/github/permatrack/pd_17fr_21ep_vis.pth) trained on PD dataset from PermaTrack. We provide our models in the ablation study [here](https://drive.google.com/drive/folders/11UIkJl7z0MKRFlNyGkS6sMS39aJbFSdc?usp=sharing).
 
 The following are the scripts to train all of the models in the ablation study.
 | Methods                                      | Scripts                                                    |
@@ -22,8 +22,8 @@ The following are the scripts to train all of the models in the ablation study.
 ## Testing
 
 The following are the scripts to test all of the models in the ablation study.
-| Methods                                      | Scripts                                                    |
-| ----                                         | ----                                                       |
+| Methods                                      | Scripts                                                              |
+| ----                                         | ----                                                                 |
 | CenterTrack                                  | ./centertrack_test.sh [model_id]                                     |
 | CenterTrack + D3D                            | ./centertrack_test.sh [model_id] --dcn_3d_aggregation                |
 | CenterTrack + C3D                            | ./centertrack_test.sh [model_id] --conv_3d_aggregation               |
@@ -35,3 +35,11 @@ The following are the scripts to test all of the models in the ablation study.
 | PermaTrack  + D3D + L<sub>con</sub> (TEDNet) | ./permatrack_test.sh [model_id] --dcn_3d_aggregation --consistency   |
 
 ## Evaluation
+The evaluation codes are modified from [HMNet](https://github.com/hamarh/HMNet_pth).To evaluate the model performance, run the following scripts to get mAP values.
+~~~
+cd $TEDNet_ROOT/src
+python psee_evaluator.py \
+    $TEDNet_ROOT/data/gen4/annotations/tracking_test \
+    $TEDNet_ROOT/exp/tracking/[exp_id]/[model_id]/dt \
+    --camera GEN4 --dt_confidence 0.1
+~~~
