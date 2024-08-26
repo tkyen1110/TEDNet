@@ -105,8 +105,8 @@ if __name__ == '__main__':
            'videos': []}
     num_images = 0
 
-    event_h5_dir = "../../data/Gen4_Automotive_event_cube_paper/{}_uint8".format(split) # .h5
-    gt_label_dir = "../../data/Gen4_Automotive/{}_dat".format(split)     # _bbox.npy
+    event_h5_dir = "../../data/gen4/{}".format(split)     # .h5
+    gt_label_dir = "../../data/gen4/{}_dat".format(split) # _bbox.npy
 
     for i, video_name in enumerate(os.listdir(event_h5_dir)):
       label_name = os.path.splitext(video_name)[0] + "_bbox.npy"

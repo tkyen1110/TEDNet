@@ -514,7 +514,7 @@ class Detector(object):
             batch_list[-1][key] = original_batch[key][0]
             if key != 'meta' and key!= 'gt_det':
               batch_list[-1][key] = batch_list[-1][key].to(self.opt.device)
-      if opt.time_profiling:
+      if self.opt.time_profiling:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -544,7 +544,7 @@ class Detector(object):
       forward_time = time.time()
 
       dets = generic_decode(output, K=self.opt.K, opt=self.opt)
-      if opt.time_profiling:
+      if self.opt.time_profiling:
         end.record()
         torch.cuda.synchronize()
         self.elapse_time.append(start.elapsed_time(end))

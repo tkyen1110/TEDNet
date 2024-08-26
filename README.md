@@ -10,29 +10,21 @@ This repository contains PyTorch code for the [ECCV NEVI Workshop 2024](https://
       year={2024}
     }
 
-
 ## Installation
 
-Please refer to [INSTALL.md](readme/INSTALL.md) for installation instructions.
+Refer to [INSTALL.md](readme/INSTALL.md) for installation instructions.
 
 ## Dataset
-TBD
-<!-- Follow the instructions in [DATA.md](readme/DATA.md) to setup the datasets. -->
 
-## Training
-TBD
+Follow the instructions in [DATA.md](readme/DATA.md) to setup the datasets.
 
-## Evaluation
-TBD
+## Training and Evaluation
 
-<!-- ## Benchmark Evaluation and Training
-After [installation](readme/INSTALL.md), follow the instructions in [DATA.md](readme/DATA.md) to setup the datasets. Then check [GETTING_STARTED.md](readme/GETTING_STARTED.md) to reproduce the results in the paper. We provide scripts for all the experiments in the [experiments](experiments) folder. -->
-
+Check [GETTING_STARTED.md](readme/GETTING_STARTED.md) to reproduce the results in the paper. We provide scripts for all the experiments in the [experiments](experiments) folder.
 
 ## License
 
 TEDNet is developed upon [PermaTrack](https://github.com/TRI-ML/permatrack). Both codebases are released under MIT License. 
-
 
 ## Acknowledgement
 This work was supported in part by National Science and Technology Council, Taiwan, under Grant NSTC 111-2634-F-002-022 and by Qualcomm through a Taiwan University Research Collaboration Project.

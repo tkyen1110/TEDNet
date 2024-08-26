@@ -92,6 +92,7 @@ then
                     -v $HOST_DIR_PATH:/home/$USER/$HOST_DIR_NAME \
                     -v /tmp/.X11-unix:/tmp/.X11-unix \
                     -v /etc/localtime:/etc/localtime:ro \
+                    --mount type=bind,source=$SCRIPT_PATH/.bashrc,target=/home/$USER/.bashrc \
                     $IMAGE_NAME /bin/bash" \
                 "docker exec -it $CONTAINER_NAME /bin/bash"
              )
